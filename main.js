@@ -1,17 +1,21 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// 🎮 DISCORD QUEST AUTOMATOR v3.0 - GITHUB EDITION
+// Discord Quest Automator — Enhanced
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Global state management
 const AutomatorState = {
 	isPaused: false,
 	isRunning: false,
 	activeQuestId: null,
 	completedQuests: 0,
-	totalQuests: 0
+	totalQuests: 0,
+	skipRequested: false,
+	lastProgressTime: null,
+	stuckWatchdogTimer: null,
+	STUCK_TIMEOUT_MS: 90_000, // 90s without progress → stuck
 };
 
-// Create the main UI overlay with Discord's native colors
+// ─── UI Creation ──────────────────────────────────────────────────────────────
+
 function createQuestUI() {
 	const existing = document.getElementById('quest-automator-ui');
 	if (existing) existing.remove();
@@ -20,907 +24,867 @@ function createQuestUI() {
 	container.id = 'quest-automator-ui';
 	container.innerHTML = `
 		<style>
-			/* Use Discord's native CSS variables */
+			@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+			* { box-sizing: border-box; }
+
 			#quest-automator-ui {
 				position: fixed;
 				top: 50%;
 				left: 50%;
 				transform: translate(-50%, -50%);
-				width: 800px;
-				max-height: 85vh;
-				background: var(--background-primary, #36393f);
-				border-radius: 8px;
-				box-shadow: 0 8px 16px rgba(0, 0, 0, 0.24);
+				width: 780px;
+				max-height: 88vh;
+				background: var(--background-primary, #313338);
+				border-radius: 12px;
+				box-shadow: 0 20px 60px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.05);
 				z-index: 99999;
-				font-family: 'gg sans', 'Noto Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif;
-				color: var(--text-normal, #dcddde);
+				font-family: 'Inter', 'gg sans', 'Noto Sans', Arial, sans-serif;
+				color: var(--text-normal, #dbdee1);
 				overflow: hidden;
-				border: 1px solid var(--background-tertiary, #202225);
 				display: flex;
 				flex-direction: column;
 			}
 
 			#quest-automator-ui.minimized {
-				width: 350px;
-				height: 52px;
-				max-height: 52px;
+				width: 320px;
+				height: 56px;
+				max-height: 56px;
 			}
 
-			#quest-automator-ui.minimized .quest-body {
-				display: none;
-			}
+			#quest-automator-ui.minimized .quest-body { display: none; }
 
-			/* Header - GitHub inspired */
-			.quest-header {
-				background: var(--background-secondary, #2f3136);
-				padding: 14px 16px;
-				border-bottom: 1px solid var(--background-modifier-accent, #4f545c);
+			/* ── Header ── */
+			.qa-header {
+				background: var(--background-secondary, #2b2d31);
+				padding: 0 16px;
+				height: 56px;
+				border-bottom: 1px solid rgba(255,255,255,0.06);
 				display: flex;
 				align-items: center;
 				justify-content: space-between;
 				cursor: move;
 				user-select: none;
+				flex-shrink: 0;
 			}
 
-			.quest-header-left {
+			.qa-header-left {
 				display: flex;
 				align-items: center;
-				gap: 12px;
+				gap: 10px;
 			}
 
-			.quest-header-title {
-				display: flex;
-				align-items: center;
-				gap: 8px;
-				font-size: 16px;
-				font-weight: 600;
-				color: var(--header-primary, #fff);
-			}
-
-			.quest-header-badge {
-				background: var(--brand-experiment, #5865f2);
-				color: white;
-				padding: 2px 8px;
-				border-radius: 12px;
-				font-size: 11px;
-				font-weight: 600;
-				text-transform: uppercase;
-			}
-
-			.quest-header-controls {
-				display: flex;
-				align-items: center;
-				gap: 8px;
-				position: relative;
-				z-index: 10;
-			}
-
-			.header-btn {
-				background: transparent;
-				border: none;
-				color: var(--interactive-normal, #b9bbbe);
-				width: 32px;
-				height: 32px;
-				border-radius: 4px;
-				cursor: pointer;
-				font-size: 16px;
+			.qa-logo {
+				width: 28px;
+				height: 28px;
+				background: linear-gradient(135deg, #5865f2 0%, #7c84f5 100%);
+				border-radius: 8px;
 				display: flex;
 				align-items: center;
 				justify-content: center;
-				transition: all 0.15s ease;
-				position: relative;
-				z-index: 11;
+				font-size: 14px;
+				flex-shrink: 0;
+			}
+
+			.qa-title {
+				font-size: 15px;
+				font-weight: 700;
+				color: var(--header-primary, #f2f3f5);
+				letter-spacing: -0.2px;
+			}
+
+			.qa-badge {
+				background: rgba(88,101,242,0.18);
+				color: #8791f7;
+				border: 1px solid rgba(88,101,242,0.3);
+				padding: 2px 7px;
+				border-radius: 6px;
+				font-size: 10px;
+				font-weight: 700;
+				letter-spacing: 0.5px;
+				text-transform: uppercase;
+			}
+
+			.qa-header-controls {
+				display: flex;
+				align-items: center;
+				gap: 4px;
+			}
+
+			.hdr-btn {
+				background: transparent;
+				border: none;
+				color: var(--interactive-normal, #949ba4);
+				width: 30px;
+				height: 30px;
+				border-radius: 6px;
+				cursor: pointer;
+				font-size: 15px;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				transition: background 0.12s, color 0.12s;
 				pointer-events: auto;
 			}
 
-			.header-btn:hover {
-				background: var(--background-modifier-hover, #40444b);
-				color: var(--interactive-hover, #dcddde);
-			}
+			.hdr-btn:hover { background: rgba(255,255,255,0.08); color: var(--header-primary, #f2f3f5); }
+			.hdr-btn.close:hover { background: rgba(216,60,62,0.2); color: #e5534b; }
 
-			.header-btn.close:hover {
-				background: var(--button-danger-background, #d83c3e);
-				color: white;
-			}
-
-			/* Main content area */
+			/* ── Body ── */
 			.quest-body {
 				flex: 1;
 				overflow-y: auto;
-				background: var(--background-primary, #36393f);
-			}
-
-			.quest-body::-webkit-scrollbar {
-				width: 16px;
-			}
-
-			.quest-body::-webkit-scrollbar-track {
-				background: var(--background-primary, #36393f);
-			}
-
-			.quest-body::-webkit-scrollbar-thumb {
-				background-color: var(--background-tertiary, #202225);
-				border: 4px solid var(--background-primary, #36393f);
-				border-radius: 8px;
-			}
-
-			.quest-body::-webkit-scrollbar-thumb:hover {
-				background-color: var(--background-modifier-accent, #4f545c);
-			}
-
-			/* Control bar - GitHub actions style */
-			.control-bar {
-				background: var(--background-secondary, #2f3136);
-				padding: 12px 16px;
-				border-bottom: 1px solid var(--background-modifier-accent, #4f545c);
 				display: flex;
-				align-items: center;
-				justify-content: space-between;
-				gap: 12px;
+				flex-direction: column;
 			}
 
-			.control-bar-left {
+			.quest-body::-webkit-scrollbar { width: 6px; }
+			.quest-body::-webkit-scrollbar-track { background: transparent; }
+			.quest-body::-webkit-scrollbar-thumb {
+				background: rgba(255,255,255,0.1);
+				border-radius: 3px;
+			}
+			.quest-body::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.18); }
+
+			/* ── Toolbar ── */
+			.qa-toolbar {
+				padding: 10px 16px;
+				background: var(--background-secondary, #2b2d31);
+				border-bottom: 1px solid rgba(255,255,255,0.06);
 				display: flex;
 				align-items: center;
 				gap: 8px;
+				flex-shrink: 0;
 			}
 
-			.control-bar-right {
-				display: flex;
-				align-items: center;
-				gap: 12px;
-			}
-
-			.control-btn {
-				background: var(--button-secondary-background, #4f545c);
+			.qa-btn {
 				border: none;
-				color: var(--text-normal, #fff);
-				padding: 8px 16px;
-				border-radius: 4px;
+				padding: 7px 14px;
+				border-radius: 6px;
 				cursor: pointer;
-				font-size: 13px;
-				font-weight: 500;
+				font-size: 12.5px;
+				font-weight: 600;
 				display: flex;
 				align-items: center;
 				gap: 6px;
-				transition: all 0.15s ease;
+				transition: filter 0.12s, opacity 0.12s;
+				white-space: nowrap;
 				pointer-events: auto;
-				position: relative;
-				z-index: 1;
+				font-family: inherit;
 			}
 
-			.control-btn:hover {
-				background: var(--button-secondary-background-hover, #5d6269);
-			}
+			.qa-btn:hover:not(:disabled) { filter: brightness(1.12); }
+			.qa-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-			.control-btn:disabled {
-				opacity: 0.5;
-				cursor: not-allowed;
-			}
+			.qa-btn.pause  { background: rgba(88,101,242,0.15); color: #8791f7; border: 1px solid rgba(88,101,242,0.25); }
+			.qa-btn.resume { background: rgba(35,160,86,0.15);  color: #3ba55d; border: 1px solid rgba(35,160,86,0.25); }
+			.qa-btn.skip   { background: rgba(240,178,50,0.12); color: #f0b232; border: 1px solid rgba(240,178,50,0.2); }
+			.qa-btn.skip:disabled { opacity: 0.3; }
 
-			.control-btn.primary {
-				background: var(--brand-experiment, #5865f2);
-				color: white;
-			}
+			.qa-spacer { flex: 1; }
 
-			.control-btn.primary:hover {
-				background: var(--brand-experiment-hover, #4752c4);
-			}
-
-			.control-btn.danger {
-				background: var(--button-danger-background, #d83c3e);
-				color: white;
-			}
-
-			.control-btn.danger:hover {
-				background: var(--button-danger-background-hover, #a12d2f);
-			}
-
-			.control-btn.success {
-				background: var(--button-positive-background, #248046);
-				color: white;
-			}
-
-			.control-btn.success:hover {
-				background: var(--button-positive-background-hover, #1a6334);
-			}
-
-			.status-indicator {
+			/* Status pill */
+			.qa-status-pill {
 				display: flex;
 				align-items: center;
-				gap: 6px;
-				font-size: 13px;
-				color: var(--text-muted, #96989d);
+				gap: 7px;
+				padding: 5px 12px;
+				background: var(--background-primary, #313338);
+				border: 1px solid rgba(255,255,255,0.07);
+				border-radius: 20px;
+				font-size: 12px;
+				font-weight: 500;
+				color: var(--text-muted, #80848e);
 			}
 
 			.status-dot {
-				width: 8px;
-				height: 8px;
+				width: 7px;
+				height: 7px;
 				border-radius: 50%;
-				background: var(--status-positive, #23a55a);
+				background: #80848e;
+				flex-shrink: 0;
+			}
+			.status-dot.running { background: #3ba55d; box-shadow: 0 0 6px rgba(59,165,93,0.5); }
+			.status-dot.paused  { background: #f0b232; box-shadow: 0 0 6px rgba(240,178,50,0.4); }
+			.status-dot.idle    { background: #80848e; }
+			.status-dot.stuck   { background: #e5534b; box-shadow: 0 0 6px rgba(229,83,75,0.5); animation: pulse-red 1s infinite; }
+
+			@keyframes pulse-red {
+				0%, 100% { box-shadow: 0 0 4px rgba(229,83,75,0.4); }
+				50%       { box-shadow: 0 0 10px rgba(229,83,75,0.8); }
 			}
 
-			.status-dot.paused {
-				background: var(--status-warning, #f0b232);
+			/* ── Stats strip ── */
+			.qa-stats {
+				display: flex;
+				padding: 12px 16px;
+				gap: 8px;
+				background: var(--background-secondary-alt, #1e1f22);
+				border-bottom: 1px solid rgba(255,255,255,0.05);
+				flex-shrink: 0;
 			}
 
-			.status-dot.idle {
-				background: var(--status-danger, #f23f42);
+			.stat-pill {
+				flex: 1;
+				background: var(--background-secondary, #2b2d31);
+				border: 1px solid rgba(255,255,255,0.06);
+				border-radius: 8px;
+				padding: 10px 14px;
+				display: flex;
+				flex-direction: column;
+				gap: 2px;
 			}
 
-			/* Stats section - GitHub contribution style */
-			.stats-section {
-				padding: 16px;
-				background: var(--background-secondary, #2f3136);
-				border-bottom: 1px solid var(--background-modifier-accent, #4f545c);
-			}
-
-			.stats-grid {
-				display: grid;
-				grid-template-columns: repeat(3, 1fr);
-				gap: 12px;
-			}
-
-			.stat-card {
-				background: var(--background-secondary-alt, #292b2f);
-				padding: 12px;
-				border-radius: 6px;
-				border: 1px solid var(--background-modifier-accent, #4f545c);
-			}
-
-			.stat-label {
-				font-size: 12px;
-				color: var(--text-muted, #96989d);
-				margin-bottom: 4px;
-				text-transform: uppercase;
+			.stat-pill-label {
+				font-size: 10.5px;
 				font-weight: 600;
-				letter-spacing: 0.5px;
+				color: var(--text-muted, #80848e);
+				text-transform: uppercase;
+				letter-spacing: 0.6px;
 			}
 
-			.stat-value {
-				font-size: 24px;
+			.stat-pill-value {
+				font-size: 22px;
 				font-weight: 700;
-				color: var(--header-primary, #fff);
+				color: var(--header-primary, #f2f3f5);
+				line-height: 1;
 			}
 
-			.stat-value.active {
-				color: var(--brand-experiment, #5865f2);
-			}
+			.stat-pill-value.blue   { color: #5865f2; }
+			.stat-pill-value.green  { color: #3ba55d; }
 
-			.stat-value.completed {
-				color: var(--button-positive-background, #248046);
-			}
-
-			/* Quest list - Linear GitHub style */
-			.quest-list {
-				padding: 0;
-			}
+			/* ── Quest list ── */
+			.qa-list { flex: 1; }
 
 			.quest-item {
-				background: var(--background-primary, #36393f);
-				border-bottom: 1px solid var(--background-modifier-accent, #4f545c);
-				padding: 16px;
-				transition: background 0.15s ease;
+				padding: 14px 16px;
+				border-bottom: 1px solid rgba(255,255,255,0.05);
+				transition: background 0.12s;
+				position: relative;
 			}
 
-			.quest-item:hover {
-				background: var(--background-secondary, #2f3136);
-			}
+			.quest-item:hover { background: rgba(255,255,255,0.02); }
 
 			.quest-item.active {
-				background: var(--background-secondary, #2f3136);
-				border-left: 3px solid var(--brand-experiment, #5865f2);
+				background: rgba(88,101,242,0.06);
+				border-left: 3px solid #5865f2;
+				padding-left: 13px;
 			}
 
 			.quest-item.completed {
-				opacity: 0.6;
-				border-left: 3px solid var(--button-positive-background, #248046);
+				opacity: 0.55;
+				border-left: 3px solid #3ba55d;
+				padding-left: 13px;
 			}
 
-			.quest-header-row {
+			.quest-item.stuck-warning {
+				border-left: 3px solid #e5534b;
+				padding-left: 13px;
+				background: rgba(229,83,75,0.05);
+			}
+
+			.quest-row {
 				display: flex;
-				align-items: center;
+				align-items: flex-start;
 				justify-content: space-between;
+				gap: 12px;
 				margin-bottom: 8px;
 			}
 
-			.quest-title-section {
+			.quest-title-row {
 				display: flex;
 				align-items: center;
 				gap: 8px;
+				flex: 1;
+				min-width: 0;
 			}
 
-			.quest-icon {
-				font-size: 20px;
-			}
+			.quest-emoji { font-size: 18px; flex-shrink: 0; }
 
 			.quest-name {
-				font-size: 14px;
+				font-size: 13.5px;
 				font-weight: 600;
-				color: var(--header-primary, #fff);
+				color: var(--header-primary, #f2f3f5);
+				white-space: nowrap;
+				overflow: hidden;
+				text-overflow: ellipsis;
 			}
 
-			.quest-status-badge {
-				padding: 3px 8px;
-				border-radius: 12px;
-				font-size: 11px;
-				font-weight: 600;
+			.quest-right {
+				display: flex;
+				align-items: center;
+				gap: 6px;
+				flex-shrink: 0;
+			}
+
+			.badge {
+				padding: 2px 8px;
+				border-radius: 6px;
+				font-size: 10.5px;
+				font-weight: 700;
 				text-transform: uppercase;
+				letter-spacing: 0.4px;
 			}
 
-			.quest-status-badge.pending {
-				background: var(--background-modifier-accent, #4f545c);
-				color: var(--text-muted, #96989d);
+			.badge.pending   { background: rgba(255,255,255,0.06); color: #80848e; }
+			.badge.active    { background: rgba(88,101,242,0.2);   color: #8791f7; }
+			.badge.completed { background: rgba(59,165,93,0.2);    color: #3ba55d; }
+			.badge.stuck     { background: rgba(229,83,75,0.2);    color: #e5534b; }
+
+			.skip-btn {
+				background: rgba(240,178,50,0.1);
+				border: 1px solid rgba(240,178,50,0.2);
+				color: #f0b232;
+				padding: 2px 9px;
+				border-radius: 5px;
+				font-size: 10.5px;
+				font-weight: 600;
+				cursor: pointer;
+				font-family: inherit;
+				transition: background 0.12s;
+				display: none;
 			}
 
-			.quest-status-badge.active {
-				background: var(--brand-experiment, #5865f2);
-				color: white;
-			}
-
-			.quest-status-badge.completed {
-				background: var(--button-positive-background, #248046);
-				color: white;
-			}
+			.skip-btn:hover { background: rgba(240,178,50,0.2); }
+			.quest-item.active .skip-btn { display: block; }
 
 			.quest-meta {
-				font-size: 13px;
-				color: var(--text-muted, #96989d);
+				font-size: 11.5px;
+				color: var(--text-muted, #80848e);
+				display: flex;
+				align-items: center;
+				gap: 6px;
 				margin-bottom: 8px;
 			}
 
-			.quest-type-tag {
-				display: inline-block;
-				background: var(--background-modifier-accent, #4f545c);
-				padding: 2px 8px;
-				border-radius: 3px;
-				font-size: 11px;
+			.meta-tag {
+				background: rgba(255,255,255,0.05);
+				border: 1px solid rgba(255,255,255,0.07);
+				padding: 1px 7px;
+				border-radius: 4px;
+				font-size: 10px;
 				font-weight: 600;
-				margin-bottom: 8px;
+				text-transform: uppercase;
+				letter-spacing: 0.3px;
 			}
 
-			/* Progress bar - GitHub PR style */
-			.progress-container {
-				margin-top: 8px;
-			}
-
-			.progress-bar {
+			/* Progress */
+			.qa-progress-bar {
 				width: 100%;
-				height: 6px;
-				background: var(--background-modifier-accent, #4f545c);
+				height: 5px;
+				background: rgba(255,255,255,0.07);
 				border-radius: 3px;
 				overflow: hidden;
 			}
 
-			.progress-fill {
+			.qa-progress-fill {
 				height: 100%;
-				background: var(--button-positive-background, #248046);
 				border-radius: 3px;
-				transition: width 0.3s ease;
+				transition: width 0.4s ease;
+				background: rgba(255,255,255,0.2);
 			}
 
-			.progress-fill.active {
-				background: var(--brand-experiment, #5865f2);
-			}
+			.qa-progress-fill.active    { background: linear-gradient(90deg, #5865f2, #7c84f5); }
+			.qa-progress-fill.completed { background: #3ba55d; }
+			.qa-progress-fill.stuck     { background: #e5534b; }
 
-			.progress-text {
+			.qa-progress-info {
 				display: flex;
 				justify-content: space-between;
-				font-size: 12px;
-				color: var(--text-muted, #96989d);
-				margin-top: 4px;
+				font-size: 11px;
+				color: var(--text-muted, #80848e);
+				margin-top: 5px;
 			}
 
-			/* Activity log - Terminal style */
-			.activity-log {
-				background: var(--background-secondary-alt, #292b2f);
-				border-top: 1px solid var(--background-modifier-accent, #4f545c);
-				max-height: 150px;
+			.qa-progress-info span:first-child { font-weight: 600; }
+
+			/* ── Log ── */
+			.qa-log {
+				background: var(--background-secondary-alt, #1e1f22);
+				border-top: 1px solid rgba(255,255,255,0.06);
+				max-height: 160px;
+				display: flex;
+				flex-direction: column;
+				flex-shrink: 0;
+			}
+
+			.qa-log-header {
+				padding: 7px 16px;
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				border-bottom: 1px solid rgba(255,255,255,0.05);
+				flex-shrink: 0;
+			}
+
+			.qa-log-title {
+				font-size: 10.5px;
+				font-weight: 700;
+				text-transform: uppercase;
+				letter-spacing: 0.7px;
+				color: var(--text-muted, #80848e);
+			}
+
+			.qa-log-clear {
+				background: none;
+				border: none;
+				color: var(--text-muted, #80848e);
+				font-size: 10px;
+				cursor: pointer;
+				font-family: inherit;
+				padding: 0;
+				transition: color 0.12s;
+			}
+
+			.qa-log-clear:hover { color: var(--header-primary, #f2f3f5); }
+
+			.qa-log-scroll {
+				flex: 1;
 				overflow-y: auto;
+				padding: 6px 0;
 			}
 
-			.activity-log::-webkit-scrollbar {
-				width: 8px;
-			}
-
-			.activity-log::-webkit-scrollbar-track {
-				background: var(--background-secondary-alt, #292b2f);
-			}
-
-			.activity-log::-webkit-scrollbar-thumb {
-				background: var(--background-tertiary, #202225);
-				border-radius: 4px;
-			}
-
-			.log-header {
-				padding: 8px 16px;
-				background: var(--background-tertiary, #202225);
-				font-size: 12px;
-				font-weight: 600;
-				color: var(--header-secondary, #b9bbbe);
-				border-bottom: 1px solid var(--background-modifier-accent, #4f545c);
-			}
-
-			.log-content {
-				padding: 8px 16px;
-				font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-				font-size: 12px;
-			}
+			.qa-log-scroll::-webkit-scrollbar { width: 4px; }
+			.qa-log-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
 
 			.log-entry {
-				padding: 4px 0;
+				padding: 3px 16px;
 				display: flex;
-				gap: 8px;
+				align-items: baseline;
+				gap: 10px;
+				font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+				font-size: 11.5px;
+				line-height: 1.5;
 			}
 
-			.log-time {
-				color: var(--text-muted, #96989d);
-			}
+			.log-entry:hover { background: rgba(255,255,255,0.02); }
 
-			.log-message {
-				flex: 1;
-			}
+			.log-time { color: var(--text-muted, #80848e); flex-shrink: 0; font-size: 10.5px; }
+			.log-msg  { flex: 1; }
 
-			.log-info { color: var(--text-link, #00aff4); }
-			.log-success { color: var(--button-positive-background, #248046); }
-			.log-warning { color: var(--status-warning, #f0b232); }
-			.log-error { color: var(--status-danger, #f23f42); }
+			.log-info    { color: #949ba4; }
+			.log-success { color: #3ba55d; }
+			.log-warning { color: #f0b232; }
+			.log-error   { color: #e5534b; }
 
-			/* No quests state */
-			.no-quests {
-				padding: 48px 24px;
+			/* ── Empty state ── */
+			.qa-empty {
+				padding: 56px 24px;
 				text-align: center;
 			}
 
-			.no-quests-icon {
-				font-size: 48px;
-				margin-bottom: 16px;
-				opacity: 0.5;
+			.qa-empty-icon { font-size: 44px; opacity: 0.35; margin-bottom: 14px; }
+
+			.qa-empty h3 {
+				font-size: 16px;
+				font-weight: 700;
+				color: var(--header-primary, #f2f3f5);
+				margin: 0 0 6px;
 			}
 
-			.no-quests h2 {
-				font-size: 18px;
-				color: var(--header-primary, #fff);
-				margin-bottom: 8px;
+			.qa-empty p {
+				font-size: 13px;
+				color: var(--text-muted, #80848e);
+				margin: 0;
 			}
 
-			.no-quests p {
-				color: var(--text-muted, #96989d);
-				font-size: 14px;
-			}
-
-			/* Confirmation modal */
-			.confirmation-overlay {
+			/* ── Confirm modal ── */
+			.qa-confirm-overlay {
 				position: fixed;
-				top: 0;
-				left: 0;
-				right: 0;
-				bottom: 0;
-				background: rgba(0, 0, 0, 0.85);
+				inset: 0;
+				background: rgba(0,0,0,0.75);
 				z-index: 999999;
 				display: flex;
 				align-items: center;
 				justify-content: center;
+				animation: fadeIn 0.12s ease;
 			}
 
-			.confirmation-modal {
-				background: var(--background-primary, #36393f);
-				border-radius: 8px;
+			@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+			.qa-confirm-modal {
+				background: var(--background-primary, #313338);
+				border-radius: 10px;
 				padding: 24px;
-				width: 440px;
-				box-shadow: 0 8px 16px rgba(0, 0, 0, 0.24);
-				position: relative;
-				z-index: 1000000;
+				width: 400px;
+				box-shadow: 0 20px 60px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.06);
 			}
 
-			.confirmation-header {
-				font-size: 20px;
-				font-weight: 600;
-				color: var(--header-primary, #fff);
-				margin-bottom: 12px;
+			.qa-confirm-title {
+				font-size: 18px;
+				font-weight: 700;
+				color: var(--header-primary, #f2f3f5);
+				margin-bottom: 10px;
 			}
 
-			.confirmation-body {
-				font-size: 14px;
-				color: var(--text-normal, #dcddde);
-				margin-bottom: 24px;
-				line-height: 1.5;
+			.qa-confirm-body {
+				font-size: 13.5px;
+				color: var(--text-normal, #dbdee1);
+				line-height: 1.6;
+				margin-bottom: 20px;
 			}
 
-			.confirmation-footer {
+			.qa-confirm-footer {
 				display: flex;
-				gap: 12px;
+				gap: 10px;
 				justify-content: flex-end;
 			}
 
-			@keyframes spin {
-				from { transform: rotate(0deg); }
-				to { transform: rotate(360deg); }
+			.qa-confirm-footer .qa-btn {
+				padding: 8px 18px;
+				font-size: 13px;
 			}
 
-			.spinning {
-				animation: spin 1s linear infinite;
-			}
+			.qa-btn.neutral { background: rgba(255,255,255,0.07); color: var(--text-normal, #dbdee1); border: 1px solid rgba(255,255,255,0.1); }
+			.qa-btn.danger  { background: rgba(229,83,75,0.2); color: #e5534b; border: 1px solid rgba(229,83,75,0.3); }
 		</style>
 
-		<!-- Main container -->
-		<div class="quest-header">
-			<div class="quest-header-left">
-				<div class="quest-header-title">
-					<span>🎮</span>
-					<span>Quest Automator</span>
-					<span class="quest-header-badge">v3.0</span>
-				</div>
+		<div class="qa-header">
+			<div class="qa-header-left">
+				<div class="qa-logo">🎮</div>
+				<span class="qa-title">Quest Automator</span>
+				<span class="qa-badge">v4.0</span>
 			</div>
-			<div class="quest-header-controls">
-				<button class="header-btn minimize" id="minimize-btn-header" title="Minimize">
-					<span id="minimize-icon">─</span>
-				</button>
-				<button class="header-btn close" id="close-btn-header" title="Close">×</button>
+			<div class="qa-header-controls">
+				<button class="hdr-btn" id="qa-minimize-btn" title="Minimize">─</button>
+				<button class="hdr-btn close" id="qa-close-btn" title="Close">✕</button>
 			</div>
 		</div>
 
 		<div class="quest-body">
-			<!-- Control bar -->
-			<div class="control-bar">
-				<div class="control-bar-left">
-					<button class="control-btn success" id="pause-btn" disabled>
-						<span id="pause-icon">⏸</span>
-						<span id="pause-text">Pause</span>
-					</button>
-					<div class="status-indicator">
-						<span class="status-dot idle" id="status-dot"></span>
-						<span id="status-text">Idle</span>
-					</div>
+			<div class="qa-toolbar">
+				<button class="qa-btn pause" id="qa-pause-btn" disabled>
+					<span id="qa-pause-icon">⏸</span>
+					<span id="qa-pause-text">Pause</span>
+				</button>
+				<button class="qa-btn skip" id="qa-skip-btn" disabled title="Skip current quest">
+					⏭ Skip Quest
+				</button>
+				<div class="qa-spacer"></div>
+				<div class="qa-status-pill">
+					<span class="status-dot idle" id="qa-status-dot"></span>
+					<span id="qa-status-text">Idle</span>
 				</div>
-				<div class="control-bar-right">
-					<span style="font-size: 12px; color: var(--text-muted, #96989d);" id="quest-counter">0 of 0 quests</span>
+				<span style="font-size: 11.5px; color: var(--text-muted,#80848e);" id="qa-counter"></span>
+			</div>
+
+			<div class="qa-stats">
+				<div class="stat-pill">
+					<div class="stat-pill-label">Total</div>
+					<div class="stat-pill-value" id="qa-total">0</div>
+				</div>
+				<div class="stat-pill">
+					<div class="stat-pill-label">Remaining</div>
+					<div class="stat-pill-value blue" id="qa-active">0</div>
+				</div>
+				<div class="stat-pill">
+					<div class="stat-pill-label">Done</div>
+					<div class="stat-pill-value green" id="qa-completed">0</div>
 				</div>
 			</div>
 
-			<!-- Stats section -->
-			<div class="stats-section">
-				<div class="stats-grid">
-					<div class="stat-card">
-						<div class="stat-label">Total Quests</div>
-						<div class="stat-value" id="total-quests">0</div>
-					</div>
-					<div class="stat-card">
-						<div class="stat-label">Active</div>
-						<div class="stat-value active" id="active-quests">0</div>
-					</div>
-					<div class="stat-card">
-						<div class="stat-label">Completed</div>
-						<div class="stat-value completed" id="completed-quests">0</div>
-					</div>
+			<div class="qa-list" id="qa-quest-list"></div>
+
+			<div class="qa-log">
+				<div class="qa-log-header">
+					<span class="qa-log-title">Activity Log</span>
+					<button class="qa-log-clear" id="qa-log-clear">Clear</button>
 				</div>
-			</div>
-
-			<!-- Quest list -->
-			<div class="quest-list" id="quest-list"></div>
-
-			<!-- Activity log -->
-			<div class="activity-log">
-				<div class="log-header">Activity Log</div>
-				<div class="log-content" id="log-content"></div>
+				<div class="qa-log-scroll" id="qa-log-scroll">
+					<div id="qa-log-content"></div>
+				</div>
 			</div>
 		</div>
 	`;
 
 	document.body.appendChild(container);
-	makeDraggable(container, container.querySelector('.quest-header'));
-	
-	// Add event listeners for buttons
-	const minimizeBtn = document.getElementById('minimize-btn-header');
-	const closeBtn = document.getElementById('close-btn-header');
-	const pauseBtn = document.getElementById('pause-btn');
-	
-	if (minimizeBtn) {
-		minimizeBtn.addEventListener('click', function(e) {
-			e.stopPropagation();
-			toggleMinimize();
-		});
-	}
-	
-	if (closeBtn) {
-		closeBtn.addEventListener('click', function(e) {
-			e.stopPropagation();
-			attemptClose();
-		});
-	}
-	
-	if (pauseBtn) {
-		pauseBtn.addEventListener('click', function(e) {
-			e.stopPropagation();
-			togglePause();
-		});
-	}
-	
+	makeDraggable(container, container.querySelector('.qa-header'));
+
+	document.getElementById('qa-minimize-btn').addEventListener('click', e => {
+		e.stopPropagation();
+		const ui = document.getElementById('quest-automator-ui');
+		const isMin = ui.classList.toggle('minimized');
+		document.getElementById('qa-minimize-btn').textContent = isMin ? '+' : '─';
+	});
+
+	document.getElementById('qa-close-btn').addEventListener('click', e => {
+		e.stopPropagation();
+		attemptClose();
+	});
+
+	document.getElementById('qa-pause-btn').addEventListener('click', e => {
+		e.stopPropagation();
+		togglePause();
+	});
+
+	document.getElementById('qa-skip-btn').addEventListener('click', e => {
+		e.stopPropagation();
+		requestSkip();
+	});
+
+	document.getElementById('qa-log-clear').addEventListener('click', () => {
+		const content = document.getElementById('qa-log-content');
+		if (content) content.innerHTML = '';
+	});
+
 	return container;
 }
 
-// Make UI draggable
+// ─── Draggable ────────────────────────────────────────────────────────────────
+
 function makeDraggable(element, handle) {
-	let pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0;
-	let isDragging = false;
-	
-	handle.onmousedown = dragMouseDown;
+	let ox = 0, oy = 0, sx = 0, sy = 0;
 
-	function dragMouseDown(e) {
-		// Don't drag if clicking on buttons or interactive elements
-		if (e.target.tagName === 'BUTTON' || e.target.closest('button')) {
-			return;
-		}
-		
+	handle.onmousedown = e => {
+		if (e.target.closest('button')) return;
 		e.preventDefault();
-		isDragging = false;
-		pos3 = e.clientX;
-		pos4 = e.clientY;
-		document.onmouseup = closeDragElement;
-		document.onmousemove = elementDrag;
-	}
+		sx = e.clientX; sy = e.clientY;
+		document.onmousemove = ev => {
+			ev.preventDefault();
+			ox = sx - ev.clientX; oy = sy - ev.clientY;
+			sx = ev.clientX;     sy = ev.clientY;
+			element.style.top = (element.offsetTop - oy) + 'px';
+			element.style.left = (element.offsetLeft - ox) + 'px';
+			element.style.transform = 'none';
+		};
+		document.onmouseup = () => {
+			document.onmousemove = null;
+			document.onmouseup = null;
+		};
+	};
+}
 
-	function elementDrag(e) {
-		e.preventDefault();
-		isDragging = true;
-		pos1 = pos3 - e.clientX;
-		pos2 = pos4 - e.clientY;
-		pos3 = e.clientX;
-		pos4 = e.clientY;
-		element.style.top = (element.offsetTop - pos2) + "px";
-		element.style.left = (element.offsetLeft - pos1) + "px";
-		element.style.transform = 'none';
-	}
+// ─── Controls ─────────────────────────────────────────────────────────────────
 
-	function closeDragElement() {
-		document.onmouseup = null;
-		document.onmousemove = null;
-		isDragging = false;
+function togglePause() {
+	AutomatorState.isPaused = !AutomatorState.isPaused;
+	const btn = document.getElementById('qa-pause-btn');
+	const icon = document.getElementById('qa-pause-icon');
+	const text = document.getElementById('qa-pause-text');
+
+	if (AutomatorState.isPaused) {
+		btn.className = 'qa-btn resume';
+		icon.textContent = '▶';
+		text.textContent = 'Resume';
+		setStatus('paused', 'Paused');
+		addLog('⏸ Paused', 'warning');
+		clearStuckWatchdog();
+	} else {
+		btn.className = 'qa-btn pause';
+		icon.textContent = '⏸';
+		text.textContent = 'Pause';
+		setStatus('running', 'Running');
+		addLog('▶ Resumed', 'success');
+		resetStuckWatchdog();
 	}
 }
 
-// UI Control functions
-window.toggleMinimize = function() {
-	const ui = document.getElementById('quest-automator-ui');
-	const icon = document.getElementById('minimize-icon');
-	ui.classList.toggle('minimized');
-	icon.textContent = ui.classList.contains('minimized') ? '+' : '─';
-};
+function requestSkip() {
+	if (!AutomatorState.isRunning || AutomatorState.isPaused) return;
+	AutomatorState.skipRequested = true;
+	addLog('⏭ Skip requested — finishing current tick…', 'warning');
+}
 
-window.attemptClose = function() {
+function attemptClose() {
 	const remaining = AutomatorState.totalQuests - AutomatorState.completedQuests;
-	
 	if (remaining > 0 && AutomatorState.isRunning) {
 		showConfirmation(
 			'Close Quest Automator?',
-			`You still have ${remaining} quest${remaining > 1 ? 's' : ''} remaining. Are you sure you want to close the automator?`,
-			() => {
-				closeUI();
-			}
+			`${remaining} quest${remaining !== 1 ? 's' : ''} still in progress. Close anyway?`,
+			() => document.getElementById('quest-automator-ui')?.remove()
 		);
 	} else {
-		closeUI();
+		document.getElementById('quest-automator-ui')?.remove();
 	}
-};
-
-function closeUI() {
-	const ui = document.getElementById('quest-automator-ui');
-	if (ui) ui.remove();
 }
 
-window.togglePause = function() {
-	AutomatorState.isPaused = !AutomatorState.isPaused;
-	
-	const pauseBtn = document.getElementById('pause-btn');
-	const pauseIcon = document.getElementById('pause-icon');
-	const pauseText = document.getElementById('pause-text');
-	const statusDot = document.getElementById('status-dot');
-	const statusText = document.getElementById('status-text');
-	
-	if (AutomatorState.isPaused) {
-		pauseBtn.className = 'control-btn primary';
-		pauseIcon.textContent = '▶';
-		pauseText.textContent = 'Resume';
-		statusDot.className = 'status-dot paused';
-		statusText.textContent = 'Paused';
-		addLog('⏸ Automation paused', 'warning');
-	} else {
-		pauseBtn.className = 'control-btn success';
-		pauseIcon.textContent = '⏸';
-		pauseText.textContent = 'Pause';
-		statusDot.className = 'status-dot';
-		statusText.textContent = 'Running';
-		addLog('▶ Automation resumed', 'success');
-	}
-};
-
-// Confirmation modal
 function showConfirmation(title, message, onConfirm) {
 	const overlay = document.createElement('div');
-	overlay.className = 'confirmation-overlay';
+	overlay.className = 'qa-confirm-overlay';
 	overlay.innerHTML = `
-		<div class="confirmation-modal">
-			<div class="confirmation-header">${title}</div>
-			<div class="confirmation-body">${message}</div>
-			<div class="confirmation-footer">
-				<button class="control-btn" id="confirm-cancel-btn">Cancel</button>
-				<button class="control-btn danger" id="confirm-close-btn">Close Automator</button>
+		<div class="qa-confirm-modal">
+			<div class="qa-confirm-title">${title}</div>
+			<div class="qa-confirm-body">${message}</div>
+			<div class="qa-confirm-footer">
+				<button class="qa-btn neutral" id="qa-cancel">Cancel</button>
+				<button class="qa-btn danger"  id="qa-confirm">Close</button>
 			</div>
 		</div>
 	`;
 	document.body.appendChild(overlay);
-	
-	// Add event listeners
-	const cancelBtn = overlay.querySelector('#confirm-cancel-btn');
-	const confirmBtn = overlay.querySelector('#confirm-close-btn');
-	
-	if (cancelBtn) {
-		cancelBtn.addEventListener('click', function() {
-			overlay.remove();
-		});
-	}
-	
-	if (confirmBtn) {
-		confirmBtn.addEventListener('click', function() {
-			overlay.remove();
-			onConfirm();
-		});
+	overlay.querySelector('#qa-cancel').addEventListener('click', () => overlay.remove());
+	overlay.querySelector('#qa-confirm').addEventListener('click', () => { overlay.remove(); onConfirm(); });
+}
+
+// ─── Stuck watchdog ───────────────────────────────────────────────────────────
+
+function resetStuckWatchdog() {
+	clearStuckWatchdog();
+	if (!AutomatorState.isRunning || AutomatorState.isPaused) return;
+	AutomatorState.lastProgressTime = Date.now();
+	AutomatorState.stuckWatchdogTimer = setTimeout(() => {
+		if (!AutomatorState.isRunning || AutomatorState.isPaused || AutomatorState.skipRequested) return;
+		const questEl = AutomatorState.activeQuestId
+			? document.getElementById(`quest-${AutomatorState.activeQuestId}`)
+			: null;
+		if (questEl) questEl.classList.add('stuck-warning');
+		setStatus('stuck', 'Stuck?');
+		addLog('⚠ No progress in 90s — auto-skipping stuck quest', 'error');
+		AutomatorState.skipRequested = true;
+	}, AutomatorState.STUCK_TIMEOUT_MS);
+}
+
+function clearStuckWatchdog() {
+	if (AutomatorState.stuckWatchdogTimer) {
+		clearTimeout(AutomatorState.stuckWatchdogTimer);
+		AutomatorState.stuckWatchdogTimer = null;
 	}
 }
 
-// Logging
+function onProgressMade() {
+	// Remove stuck styling from active quest
+	if (AutomatorState.activeQuestId) {
+		const el = document.getElementById(`quest-${AutomatorState.activeQuestId}`);
+		if (el) el.classList.remove('stuck-warning');
+	}
+	if (AutomatorState.isRunning && !AutomatorState.isPaused) {
+		setStatus('running', 'Running');
+	}
+	resetStuckWatchdog();
+}
+
+// ─── Log ──────────────────────────────────────────────────────────────────────
+
 function addLog(message, type = 'info') {
-	const logContent = document.getElementById('log-content');
-	if (!logContent) return;
-	
+	const content = document.getElementById('qa-log-content');
+	const scroll  = document.getElementById('qa-log-scroll');
+	if (!content) return;
+
 	const entry = document.createElement('div');
 	entry.className = 'log-entry';
 	entry.innerHTML = `
-		<span class="log-time">${new Date().toLocaleTimeString()}</span>
-		<span class="log-message log-${type}">${message}</span>
+		<span class="log-time">${new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}</span>
+		<span class="log-msg log-${type}">${message}</span>
 	`;
-	logContent.appendChild(entry);
-	logContent.parentElement.scrollTop = logContent.parentElement.scrollHeight;
+	content.appendChild(entry);
+	if (scroll) scroll.scrollTop = scroll.scrollHeight;
 
-	console.log(`%c${message}`, `color: ${
-		type === 'success' ? '#248046' :
-		type === 'error' ? '#f23f42' :
-		type === 'warning' ? '#f0b232' :
-		'#00aff4'
-	}`);
+	console.log(`%c[QA] ${message}`, `color:${
+		type === 'success' ? '#3ba55d' :
+		type === 'error'   ? '#e5534b' :
+		type === 'warning' ? '#f0b232' : '#5865f2'
+	};font-weight:600`);
 }
 
-// Update quest display
-function updateQuestDisplay(quests, activeQuestId = null) {
-	const questList = document.getElementById('quest-list');
-	if (!questList) return;
+// ─── Status ───────────────────────────────────────────────────────────────────
 
-	if (quests.length === 0) {
-		questList.innerHTML = `
-			<div class="no-quests">
-				<div class="no-quests-icon">✨</div>
-				<h2>No Active Quests</h2>
-				<p>You don't have any uncompleted quests at the moment!</p>
-			</div>
-		`;
+function setStatus(state, text) {
+	const dot = document.getElementById('qa-status-dot');
+	const lbl = document.getElementById('qa-status-text');
+	if (dot) dot.className = `status-dot ${state}`;
+	if (lbl) lbl.textContent = text;
+
+	const pauseBtn = document.getElementById('qa-pause-btn');
+	const skipBtn  = document.getElementById('qa-skip-btn');
+	const idle = state === 'idle' || text === 'Complete';
+	if (pauseBtn) pauseBtn.disabled = idle;
+	if (skipBtn)  skipBtn.disabled  = idle || state === 'paused';
+}
+
+// ─── Stats ────────────────────────────────────────────────────────────────────
+
+function updateStats(total, remaining, completed) {
+	const t = document.getElementById('qa-total');
+	const a = document.getElementById('qa-active');
+	const c = document.getElementById('qa-completed');
+	const k = document.getElementById('qa-counter');
+	if (t) t.textContent = total;
+	if (a) a.textContent = remaining;
+	if (c) c.textContent = completed;
+	if (k) k.textContent = `${completed} / ${total}`;
+}
+
+// ─── Quest display ────────────────────────────────────────────────────────────
+
+function updateQuestDisplay(quests, activeQuestId = null) {
+	const list = document.getElementById('qa-quest-list');
+	if (!list) return;
+
+	if (!quests.length) {
+		list.innerHTML = `
+			<div class="qa-empty">
+				<div class="qa-empty-icon">✨</div>
+				<h3>All done!</h3>
+				<p>No active quests found in your account.</p>
+			</div>`;
 		return;
 	}
 
-	questList.innerHTML = quests.map((quest, index) => {
-		const taskConfig = quest.config.taskConfig ?? quest.config.taskConfigV2;
-		const taskName = supportedTasks.find(x => taskConfig.tasks[x] != null);
-		const emoji = taskEmojis[taskName] || "⚡";
+	list.innerHTML = quests.map(quest => {
+		const taskConfig   = quest.config.taskConfig ?? quest.config.taskConfigV2;
+		const taskName     = supportedTasks.find(x => taskConfig.tasks[x] != null);
+		const emoji        = taskEmojis[taskName] || '⚡';
 		const secondsNeeded = taskConfig.tasks[taskName].target;
-		const secondsDone = quest.userStatus?.progress?.[taskName]?.value ?? 0;
-		const progressPercent = Math.floor((secondsDone / secondsNeeded) * 100);
-		const timeLeft = Math.ceil((secondsNeeded - secondsDone) / 60);
-		
-		const isActive = quest.id === activeQuestId;
-		const isCompleted = quest.userStatus?.completedAt;
-		
-		let statusClass = 'pending';
-		let statusText = 'Pending';
-		let itemClass = 'quest-item';
-		
-		if (isCompleted) {
-			statusClass = 'completed';
-			statusText = 'Completed';
-			itemClass += ' completed';
-		} else if (isActive) {
-			statusClass = 'active';
-			statusText = 'Active';
-			itemClass += ' active';
-		}
+		const secondsDone  = quest.userStatus?.progress?.[taskName]?.value ?? 0;
+		const pct          = Math.min(100, Math.floor((secondsDone / secondsNeeded) * 100));
+		const timeLeft     = Math.ceil((secondsNeeded - secondsDone) / 60);
+
+		const isActive    = quest.id === activeQuestId;
+		const isCompleted = !!quest.userStatus?.completedAt;
+		const statusClass = isCompleted ? 'completed' : isActive ? 'active' : 'pending';
+		const statusLabel = isCompleted ? 'Done' : isActive ? 'Active' : 'Pending';
+		const itemClass   = isCompleted ? 'quest-item completed' : isActive ? 'quest-item active' : 'quest-item';
+		const fillClass   = isCompleted ? 'completed' : isActive ? 'active' : '';
 
 		return `
 			<div class="${itemClass}" id="quest-${quest.id}">
-				<div class="quest-header-row">
-					<div class="quest-title-section">
-						<span class="quest-icon">${emoji}</span>
-						<span class="quest-name">${quest.config.messages.questName}</span>
+				<div class="quest-row">
+					<div class="quest-title-row">
+						<span class="quest-emoji">${emoji}</span>
+						<span class="quest-name" title="${quest.config.messages.questName}">${quest.config.messages.questName}</span>
 					</div>
-					<span class="quest-status-badge ${statusClass}">${statusText}</span>
+					<div class="quest-right">
+						<button class="skip-btn" onclick="(function(){window._qaSkipCurrent && window._qaSkipCurrent()})()">Skip</button>
+						<span class="badge ${statusClass}">${statusLabel}</span>
+					</div>
 				</div>
 				<div class="quest-meta">
-					🎮 ${quest.config.application.name}
-					<span class="quest-type-tag">${taskName.replace(/_/g, ' ')}</span>
+					${quest.config.application.name}
+					<span class="meta-tag">${taskName.replace(/_/g,' ')}</span>
 				</div>
-				<div class="progress-container">
-					<div class="progress-bar">
-						<div class="progress-fill ${isActive ? 'active' : ''}" style="width: ${progressPercent}%"></div>
-					</div>
-					<div class="progress-text">
-						<span>${progressPercent}% complete (${secondsDone}/${secondsNeeded}s)</span>
-						<span>${timeLeft} min remaining</span>
-					</div>
+				<div class="qa-progress-bar">
+					<div class="qa-progress-fill ${fillClass}" style="width:${pct}%"></div>
 				</div>
-			</div>
-		`;
+				<div class="qa-progress-info">
+					<span>${pct}%</span>
+					<span>${isCompleted ? 'Completed' : `~${timeLeft}m left · ${secondsDone}/${secondsNeeded}s`}</span>
+				</div>
+			</div>`;
 	}).join('');
 }
 
-// Update stats
-function updateStats(total, active, completed) {
-	const totalEl = document.getElementById('total-quests');
-	const activeEl = document.getElementById('active-quests');
-	const completedEl = document.getElementById('completed-quests');
-	const counterEl = document.getElementById('quest-counter');
-	
-	if (totalEl) totalEl.textContent = total;
-	if (activeEl) activeEl.textContent = active;
-	if (completedEl) completedEl.textContent = completed;
-	if (counterEl) counterEl.textContent = `${completed} of ${total} quests`;
-}
-
-// Update quest progress
 function updateQuestProgress(questId, progress, total) {
-	const questEl = document.getElementById(`quest-${questId}`);
-	if (!questEl) return;
+	const el = document.getElementById(`quest-${questId}`);
+	if (!el) return;
 
-	const progressPercent = Math.floor((progress / total) * 100);
+	const pct      = Math.min(100, Math.floor((progress / total) * 100));
 	const timeLeft = Math.ceil((total - progress) / 60);
 
-	const progressFill = questEl.querySelector('.progress-fill');
-	const progressText = questEl.querySelector('.progress-text');
+	const fill = el.querySelector('.qa-progress-fill');
+	const info = el.querySelector('.qa-progress-info');
 
-	if (progressFill) {
-		progressFill.style.width = `${progressPercent}%`;
-	}
-
-	if (progressText) {
-		progressText.innerHTML = `
-			<span>${progressPercent}% complete (${progress}/${total}s)</span>
-			<span>${timeLeft} min remaining</span>
-		`;
-	}
+	if (fill) fill.style.width = `${pct}%`;
+	if (info) info.innerHTML = `
+		<span>${pct}%</span>
+		<span>~${timeLeft}m left · ${progress}/${total}s</span>
+	`;
 }
 
-// Update status
-function setStatus(status, text) {
-	const statusDot = document.getElementById('status-dot');
-	const statusText = document.getElementById('status-text');
-	const pauseBtn = document.getElementById('pause-btn');
-	
-	if (statusDot) {
-		statusDot.className = `status-dot ${status}`;
-	}
-	if (statusText) {
-		statusText.textContent = text;
-	}
-	if (pauseBtn) {
-		pauseBtn.disabled = status === 'idle';
-	}
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// MAIN AUTOMATION LOGIC
-// ═══════════════════════════════════════════════════════════════════════════════
+// ─── Main automation ──────────────────────────────────────────────────────────
 
 createQuestUI();
-addLog('🚀 Quest Automator initialized', 'info');
-
-// Initialize Discord internals
-addLog('Connecting to Discord...', 'info');
+addLog('🚀 Quest Automator v4.0 initialized', 'info');
+addLog('Connecting to Discord internals…', 'info');
 
 delete window.$;
 let wpRequire = webpackChunkdiscord_app.push([[Symbol()], {}, r => r]);
@@ -929,44 +893,41 @@ webpackChunkdiscord_app.pop();
 let ApplicationStreamingStore = Object.values(wpRequire.c).find(x => x?.exports?.Z?.__proto__?.getStreamerActiveStreamMetadata)?.exports?.Z;
 let RunningGameStore, QuestsStore, ChannelStore, GuildChannelStore, FluxDispatcher, api;
 
-if(!ApplicationStreamingStore) {
+if (!ApplicationStreamingStore) {
 	ApplicationStreamingStore = Object.values(wpRequire.c).find(x => x?.exports?.A?.__proto__?.getStreamerActiveStreamMetadata).exports.A;
-	RunningGameStore = Object.values(wpRequire.c).find(x => x?.exports?.Ay?.getRunningGames).exports.Ay;
-	QuestsStore = Object.values(wpRequire.c).find(x => x?.exports?.A?.__proto__?.getQuest).exports.A;
-	ChannelStore = Object.values(wpRequire.c).find(x => x?.exports?.A?.__proto__?.getAllThreadsForParent).exports.A;
+	RunningGameStore  = Object.values(wpRequire.c).find(x => x?.exports?.Ay?.getRunningGames).exports.Ay;
+	QuestsStore       = Object.values(wpRequire.c).find(x => x?.exports?.A?.__proto__?.getQuest).exports.A;
+	ChannelStore      = Object.values(wpRequire.c).find(x => x?.exports?.A?.__proto__?.getAllThreadsForParent).exports.A;
 	GuildChannelStore = Object.values(wpRequire.c).find(x => x?.exports?.Ay?.getSFWDefaultChannel).exports.Ay;
-	FluxDispatcher = Object.values(wpRequire.c).find(x => x?.exports?.h?.__proto__?.flushWaitQueue).exports.h;
-	api = Object.values(wpRequire.c).find(x => x?.exports?.Bo?.get).exports.Bo;
+	FluxDispatcher    = Object.values(wpRequire.c).find(x => x?.exports?.h?.__proto__?.flushWaitQueue).exports.h;
+	api               = Object.values(wpRequire.c).find(x => x?.exports?.Bo?.get).exports.Bo;
 } else {
-	RunningGameStore = Object.values(wpRequire.c).find(x => x?.exports?.ZP?.getRunningGames).exports.ZP;
-	QuestsStore = Object.values(wpRequire.c).find(x => x?.exports?.Z?.__proto__?.getQuest).exports.Z;
-	ChannelStore = Object.values(wpRequire.c).find(x => x?.exports?.Z?.__proto__?.getAllThreadsForParent).exports.Z;
+	RunningGameStore  = Object.values(wpRequire.c).find(x => x?.exports?.ZP?.getRunningGames).exports.ZP;
+	QuestsStore       = Object.values(wpRequire.c).find(x => x?.exports?.Z?.__proto__?.getQuest).exports.Z;
+	ChannelStore      = Object.values(wpRequire.c).find(x => x?.exports?.Z?.__proto__?.getAllThreadsForParent).exports.Z;
 	GuildChannelStore = Object.values(wpRequire.c).find(x => x?.exports?.ZP?.getSFWDefaultChannel).exports.ZP;
-	FluxDispatcher = Object.values(wpRequire.c).find(x => x?.exports?.Z?.__proto__?.flushWaitQueue).exports.Z;
-	api = Object.values(wpRequire.c).find(x => x?.exports?.tn?.get).exports.tn;	
+	FluxDispatcher    = Object.values(wpRequire.c).find(x => x?.exports?.Z?.__proto__?.flushWaitQueue).exports.Z;
+	api               = Object.values(wpRequire.c).find(x => x?.exports?.tn?.get).exports.tn;
 }
 
-addLog('✓ Connected successfully', 'success');
+addLog('✓ Connected to Discord', 'success');
 
-const supportedTasks = ["WATCH_VIDEO", "PLAY_ON_DESKTOP", "STREAM_ON_DESKTOP", "PLAY_ACTIVITY", "WATCH_VIDEO_ON_MOBILE"];
+const supportedTasks = ['WATCH_VIDEO', 'PLAY_ON_DESKTOP', 'STREAM_ON_DESKTOP', 'PLAY_ACTIVITY', 'WATCH_VIDEO_ON_MOBILE'];
 const taskEmojis = {
-	"WATCH_VIDEO": "📺",
-	"WATCH_VIDEO_ON_MOBILE": "📱",
-	"PLAY_ON_DESKTOP": "🎮",
-	"STREAM_ON_DESKTOP": "📡",
-	"PLAY_ACTIVITY": "🎯"
+	WATCH_VIDEO: '📺', WATCH_VIDEO_ON_MOBILE: '📱',
+	PLAY_ON_DESKTOP: '🎮', STREAM_ON_DESKTOP: '📡', PLAY_ACTIVITY: '🎯',
 };
 
-addLog('Scanning for active quests...', 'info');
+addLog('Scanning quests…', 'info');
 
-let quests = [...QuestsStore.quests.values()].filter(x => 
-	x.userStatus?.enrolledAt && 
-	!x.userStatus?.completedAt && 
-	new Date(x.config.expiresAt).getTime() > Date.now() && 
+let quests = [...QuestsStore.quests.values()].filter(x =>
+	x.userStatus?.enrolledAt &&
+	!x.userStatus?.completedAt &&
+	new Date(x.config.expiresAt).getTime() > Date.now() &&
 	supportedTasks.find(y => Object.keys((x.config.taskConfig ?? x.config.taskConfigV2).tasks).includes(y))
 );
 
-let isApp = typeof DiscordNative !== "undefined";
+const isApp = typeof DiscordNative !== 'undefined';
 
 AutomatorState.totalQuests = quests.length;
 AutomatorState.completedQuests = 0;
@@ -974,222 +935,236 @@ AutomatorState.completedQuests = 0;
 updateStats(AutomatorState.totalQuests, AutomatorState.totalQuests, 0);
 updateQuestDisplay(quests);
 
-if (quests.length === 0) {
+if (!quests.length) {
 	addLog('No active quests found', 'warning');
 	setStatus('idle', 'Idle');
 } else {
 	addLog(`Found ${AutomatorState.totalQuests} quest(s)`, 'success');
-	addLog('Starting automation...', 'info');
 	AutomatorState.isRunning = true;
-	setStatus('', 'Running');
+	setStatus('running', 'Running');
+	resetStuckWatchdog();
 
-	let doJob = function() {
-		// Check if paused
-		if (AutomatorState.isPaused) {
-			setTimeout(doJob, 1000);
-			return;
+	// Expose skip trigger globally for per-quest skip buttons
+	window._qaSkipCurrent = () => requestSkip();
+
+	async function doJob() {
+		if (AutomatorState.skipRequested) {
+			AutomatorState.skipRequested = false;
+			clearStuckWatchdog();
+			addLog('⏭ Quest skipped', 'warning');
+			// remove stuck styling
+			if (AutomatorState.activeQuestId) {
+				document.getElementById(`quest-${AutomatorState.activeQuestId}`)?.classList.remove('stuck-warning');
+			}
+		}
+
+		// Wait out pause
+		while (AutomatorState.isPaused) {
+			await sleep(1000);
 		}
 
 		const quest = quests.pop();
-		if(!quest) {
-			addLog(`🎉 All quests completed!`, 'success');
+		if (!quest) {
+			addLog('🎉 All quests completed!', 'success');
 			updateStats(AutomatorState.totalQuests, 0, AutomatorState.completedQuests);
 			setStatus('idle', 'Complete');
+			clearStuckWatchdog();
 			AutomatorState.isRunning = false;
+			document.getElementById('qa-skip-btn').disabled = true;
 			return;
 		}
 
-		const pid = Math.floor(Math.random() * 30000) + 1000;
-		
-		const applicationId = quest.config.application.id;
+		const pid             = Math.floor(Math.random() * 30000) + 1000;
+		const applicationId   = quest.config.application.id;
 		const applicationName = quest.config.application.name;
-		const questName = quest.config.messages.questName;
-		const taskConfig = quest.config.taskConfig ?? quest.config.taskConfigV2;
-		const taskName = supportedTasks.find(x => taskConfig.tasks[x] != null);
-		const secondsNeeded = taskConfig.tasks[taskName].target;
-		let secondsDone = quest.userStatus?.progress?.[taskName]?.value ?? 0;
+		const questName       = quest.config.messages.questName;
+		const taskConfig      = quest.config.taskConfig ?? quest.config.taskConfigV2;
+		const taskName        = supportedTasks.find(x => taskConfig.tasks[x] != null);
+		const secondsNeeded   = taskConfig.tasks[taskName].target;
+		let   secondsDone     = quest.userStatus?.progress?.[taskName]?.value ?? 0;
 
 		AutomatorState.completedQuests++;
 		AutomatorState.activeQuestId = quest.id;
-		updateStats(AutomatorState.totalQuests, AutomatorState.totalQuests - AutomatorState.completedQuests, AutomatorState.completedQuests);
+		updateStats(AutomatorState.totalQuests, AutomatorState.totalQuests - AutomatorState.completedQuests, AutomatorState.completedQuests - 1);
 		updateQuestDisplay([quest, ...quests], quest.id);
-
 		addLog(`▶ Processing: ${questName}`, 'info');
 
-		if(taskName === "WATCH_VIDEO" || taskName === "WATCH_VIDEO_ON_MOBILE") {
-			addLog(`📺 Video quest detected`, 'info');
-			
-			const maxFuture = 10, speed = 7, interval = 1;
-			const enrolledAt = new Date(quest.userStatus.enrolledAt).getTime();
+		resetStuckWatchdog();
+
+		// ── WATCH_VIDEO ──────────────────────────────────────────────────────
+		if (taskName === 'WATCH_VIDEO' || taskName === 'WATCH_VIDEO_ON_MOBILE') {
+			addLog('📺 Video quest — fast-forwarding…', 'info');
+			const maxFuture = 10, speed = 7, enrolledAt = new Date(quest.userStatus.enrolledAt).getTime();
 			let completed = false;
-			
-			let fn = async () => {			
-				while(true) {
-					if (AutomatorState.isPaused) {
-						await new Promise(resolve => setTimeout(resolve, 1000));
-						continue;
-					}
 
-					const maxAllowed = Math.floor((Date.now() - enrolledAt)/1000) + maxFuture;
-					const diff = maxAllowed - secondsDone;
-					const timestamp = secondsDone + speed;
-					
-					if(diff >= speed) {
-						const res = await api.post({url: `/quests/${quest.id}/video-progress`, body: {timestamp: Math.min(secondsNeeded, timestamp + Math.random())}});
-						completed = res.body.completed_at != null;
-						secondsDone = Math.min(secondsNeeded, timestamp);
-						
-						updateQuestProgress(quest.id, secondsDone, secondsNeeded);
-					}
-					
-					if(timestamp >= secondsNeeded) {
-						break;
-					}
-					await new Promise(resolve => setTimeout(resolve, interval * 1000));
-				}
-				
-				if(!completed) {
-					await api.post({url: `/quests/${quest.id}/video-progress`, body: {timestamp: secondsNeeded}});
-				}
-				
-				quest.userStatus.completedAt = new Date();
-				addLog(`✅ "${questName}" completed`, 'success');
-				updateQuestDisplay([quest, ...quests]);
-				setTimeout(doJob, 1000);
-			};
-			fn();
-			
-		} else if(taskName === "PLAY_ON_DESKTOP") {
-			if(!isApp) {
-				addLog('❌ Browser not supported for this quest', 'error');
-				addLog('Use Discord Desktop App', 'warning');
-				setTimeout(doJob, 1000);
-			} else {
-				addLog(`🎮 Desktop game quest detected`, 'info');
-				
-				api.get({url: `/applications/public?application_ids=${applicationId}`}).then(res => {
-					const appData = res.body[0];
-					const exeName = appData.executables.find(x => x.os === "win32").name.replace(">","");
-					
-					const fakeGame = {
-						cmdLine: `C:\\Program Files\\${appData.name}\\${exeName}`,
-						exeName,
-						exePath: `c:/program files/${appData.name.toLowerCase()}/${exeName}`,
-						hidden: false,
-						isLauncher: false,
-						id: applicationId,
-						name: appData.name,
-						pid: pid,
-						pidPath: [pid],
-						processName: appData.name,
-						start: Date.now(),
-					};
-					
-					const realGames = RunningGameStore.getRunningGames();
-					const fakeGames = [fakeGame];
-					const realGetRunningGames = RunningGameStore.getRunningGames;
-					const realGetGameForPID = RunningGameStore.getGameForPID;
-					
-					RunningGameStore.getRunningGames = () => fakeGames;
-					RunningGameStore.getGameForPID = (pid) => fakeGames.find(x => x.pid === pid);
-					FluxDispatcher.dispatch({type: "RUNNING_GAMES_CHANGE", removed: realGames, added: [fakeGame], games: fakeGames});
-					
-					addLog(`✓ Spoofed ${applicationName}`, 'success');
-					
-					let fn = data => {
-						if (AutomatorState.isPaused) return;
+			while (true) {
+				// skip/pause handling
+				if (AutomatorState.skipRequested) break;
+				while (AutomatorState.isPaused) await sleep(1000);
+				if (AutomatorState.skipRequested) break;
 
-						let progress = quest.config.configVersion === 1 ? data.userStatus.streamProgressSeconds : Math.floor(data.userStatus.progress.PLAY_ON_DESKTOP.value);
-						updateQuestProgress(quest.id, progress, secondsNeeded);
-						
-						if(progress >= secondsNeeded) {
-							quest.userStatus.completedAt = new Date();
-							addLog(`✅ "${questName}" completed`, 'success');
-							
-							RunningGameStore.getRunningGames = realGetRunningGames;
-							RunningGameStore.getGameForPID = realGetGameForPID;
-							FluxDispatcher.dispatch({type: "RUNNING_GAMES_CHANGE", removed: [fakeGame], added: [], games: []});
-							FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
-							
-							updateQuestDisplay([quest, ...quests]);
-							setTimeout(doJob, 1000);
-						}
-					};
-					FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
-				});
+				const maxAllowed = Math.floor((Date.now() - enrolledAt) / 1000) + maxFuture;
+				if (maxAllowed - secondsDone >= speed) {
+					const ts = Math.min(secondsNeeded, secondsDone + speed + Math.random());
+					const res = await api.post({ url: `/quests/${quest.id}/video-progress`, body: { timestamp: ts } });
+					completed = res.body.completed_at != null;
+					secondsDone = Math.min(secondsNeeded, secondsDone + speed);
+					updateQuestProgress(quest.id, secondsDone, secondsNeeded);
+					onProgressMade();
+				}
+
+				if (secondsDone >= secondsNeeded) break;
+				await sleep(1000);
 			}
-			
-		} else if(taskName === "STREAM_ON_DESKTOP") {
-			if(!isApp) {
-				addLog('❌ Browser not supported for this quest', 'error');
-				addLog('Use Discord Desktop App', 'warning');
-				setTimeout(doJob, 1000);
-			} else {
-				addLog(`📡 Stream quest detected`, 'info');
-				addLog('⚠ Need 1+ person in VC', 'warning');
-				
-				let realFunc = ApplicationStreamingStore.getStreamerActiveStreamMetadata;
-				ApplicationStreamingStore.getStreamerActiveStreamMetadata = () => ({
-					id: applicationId,
-					pid,
-					sourceName: null
-				});
-				
-				addLog(`✓ Spoofed stream metadata`, 'success');
-				
-				let fn = data => {
+
+			if (!AutomatorState.skipRequested && !completed) {
+				await api.post({ url: `/quests/${quest.id}/video-progress`, body: { timestamp: secondsNeeded } });
+			}
+
+		// ── PLAY_ON_DESKTOP ──────────────────────────────────────────────────
+		} else if (taskName === 'PLAY_ON_DESKTOP') {
+			if (!isApp) {
+				addLog('❌ PLAY_ON_DESKTOP requires Discord Desktop App — skipping', 'error');
+				quests.push(quest); // put it back? No — just skip gracefully
+				AutomatorState.completedQuests--;
+				setTimeout(doJob, 500);
+				return;
+			}
+
+			addLog(`🎮 Spoofing game: ${applicationName}`, 'info');
+			const appRes   = await api.get({ url: `/applications/public?application_ids=${applicationId}` });
+			const appData  = appRes.body[0];
+			const exeName  = appData.executables.find(x => x.os === 'win32').name.replace('>', '');
+
+			const fakeGame = {
+				cmdLine: `C:\\Program Files\\${appData.name}\\${exeName}`,
+				exeName, exePath: `c:/program files/${appData.name.toLowerCase()}/${exeName}`,
+				hidden: false, isLauncher: false, id: applicationId,
+				name: appData.name, pid, pidPath: [pid],
+				processName: appData.name, start: Date.now(),
+			};
+
+			const realGetRunningGames = RunningGameStore.getRunningGames;
+			const realGetGameForPID   = RunningGameStore.getGameForPID;
+			const fakeGames = [fakeGame];
+
+			RunningGameStore.getRunningGames = () => fakeGames;
+			RunningGameStore.getGameForPID   = p => fakeGames.find(x => x.pid === p);
+			FluxDispatcher.dispatch({ type: 'RUNNING_GAMES_CHANGE', removed: RunningGameStore.getRunningGames(), added: [fakeGame], games: fakeGames });
+			addLog(`✓ Spoofed ${applicationName}`, 'success');
+
+			// Heartbeat listener — returns a cleanup fn
+			await new Promise(resolve => {
+				const fn = data => {
+					if (AutomatorState.skipRequested) {
+						cleanup(); resolve(); return;
+					}
 					if (AutomatorState.isPaused) return;
-
-					let progress = quest.config.configVersion === 1 ? data.userStatus.streamProgressSeconds : Math.floor(data.userStatus.progress.STREAM_ON_DESKTOP.value);
+					const progress = quest.config.configVersion === 1
+						? data.userStatus.streamProgressSeconds
+						: Math.floor(data.userStatus.progress.PLAY_ON_DESKTOP.value);
 					updateQuestProgress(quest.id, progress, secondsNeeded);
-					
-					if(progress >= secondsNeeded) {
-						quest.userStatus.completedAt = new Date();
-						addLog(`✅ "${questName}" completed`, 'success');
-						
-						ApplicationStreamingStore.getStreamerActiveStreamMetadata = realFunc;
-						FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
-						
-						updateQuestDisplay([quest, ...quests]);
-						setTimeout(doJob, 1000);
-					}
+					onProgressMade();
+					if (progress >= secondsNeeded) { cleanup(); resolve(); }
 				};
-				FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
-			}
-			
-		} else if(taskName === "PLAY_ACTIVITY") {
-			addLog(`🎯 Activity quest detected`, 'info');
-			
-			const channelId = ChannelStore.getSortedPrivateChannels()[0]?.id ?? Object.values(GuildChannelStore.getAllGuilds()).find(x => x != null && x.VOCAL.length > 0).VOCAL[0].channel.id;
-			const streamKey = `call:${channelId}:1`;
-			
-			let fn = async () => {
-				while(true) {
-					if (AutomatorState.isPaused) {
-						await new Promise(resolve => setTimeout(resolve, 1000));
-						continue;
-					}
+				const cleanup = () => {
+					RunningGameStore.getRunningGames = realGetRunningGames;
+					RunningGameStore.getGameForPID   = realGetGameForPID;
+					FluxDispatcher.dispatch({ type: 'RUNNING_GAMES_CHANGE', removed: [fakeGame], added: [], games: [] });
+					FluxDispatcher.unsubscribe('QUESTS_SEND_HEARTBEAT_SUCCESS', fn);
+				};
 
-					const res = await api.post({url: `/quests/${quest.id}/heartbeat`, body: {stream_key: streamKey, terminal: false}});
-					const progress = res.body.progress.PLAY_ACTIVITY.value;
+				// Safety: auto-resolve if stuck with skip
+				const stuckCheck = setInterval(() => {
+					if (AutomatorState.skipRequested) { clearInterval(stuckCheck); cleanup(); resolve(); }
+				}, 2000);
+
+				FluxDispatcher.subscribe('QUESTS_SEND_HEARTBEAT_SUCCESS', fn);
+			});
+
+		// ── STREAM_ON_DESKTOP ────────────────────────────────────────────────
+		} else if (taskName === 'STREAM_ON_DESKTOP') {
+			if (!isApp) {
+				addLog('❌ STREAM_ON_DESKTOP requires Discord Desktop App — skipping', 'error');
+				AutomatorState.completedQuests--;
+				setTimeout(doJob, 500);
+				return;
+			}
+
+			addLog('📡 Spoofing stream… (you need 1+ person in VC)', 'warning');
+			const realStreamMeta = ApplicationStreamingStore.getStreamerActiveStreamMetadata;
+			ApplicationStreamingStore.getStreamerActiveStreamMetadata = () => ({ id: applicationId, pid, sourceName: null });
+			addLog('✓ Spoofed stream metadata', 'success');
+
+			await new Promise(resolve => {
+				const fn = data => {
+					if (AutomatorState.skipRequested) { cleanup(); resolve(); return; }
+					if (AutomatorState.isPaused) return;
+					const progress = quest.config.configVersion === 1
+						? data.userStatus.streamProgressSeconds
+						: Math.floor(data.userStatus.progress.STREAM_ON_DESKTOP.value);
 					updateQuestProgress(quest.id, progress, secondsNeeded);
-					
-					await new Promise(resolve => setTimeout(resolve, 20 * 1000));
-					
-					if(progress >= secondsNeeded) {
-						await api.post({url: `/quests/${quest.id}/heartbeat`, body: {stream_key: streamKey, terminal: true}});
-						break;
-					}
+					onProgressMade();
+					if (progress >= secondsNeeded) { cleanup(); resolve(); }
+				};
+				const cleanup = () => {
+					ApplicationStreamingStore.getStreamerActiveStreamMetadata = realStreamMeta;
+					FluxDispatcher.unsubscribe('QUESTS_SEND_HEARTBEAT_SUCCESS', fn);
+				};
+				const stuckCheck = setInterval(() => {
+					if (AutomatorState.skipRequested) { clearInterval(stuckCheck); cleanup(); resolve(); }
+				}, 2000);
+				FluxDispatcher.subscribe('QUESTS_SEND_HEARTBEAT_SUCCESS', fn);
+			});
+
+		// ── PLAY_ACTIVITY ────────────────────────────────────────────────────
+		} else if (taskName === 'PLAY_ACTIVITY') {
+			addLog('🎯 Activity quest — sending heartbeats…', 'info');
+			const channelId = ChannelStore.getSortedPrivateChannels()[0]?.id ??
+				Object.values(GuildChannelStore.getAllGuilds()).find(x => x?.VOCAL?.length > 0).VOCAL[0].channel.id;
+			const streamKey = `call:${channelId}:1`;
+			let progress = 0;
+
+			while (true) {
+				if (AutomatorState.skipRequested) break;
+				while (AutomatorState.isPaused) await sleep(1000);
+				if (AutomatorState.skipRequested) break;
+
+				const res = await api.post({ url: `/quests/${quest.id}/heartbeat`, body: { stream_key: streamKey, terminal: false } });
+				progress = res.body.progress.PLAY_ACTIVITY.value;
+				updateQuestProgress(quest.id, progress, secondsNeeded);
+				onProgressMade();
+
+				if (progress >= secondsNeeded) {
+					await api.post({ url: `/quests/${quest.id}/heartbeat`, body: { stream_key: streamKey, terminal: true } });
+					break;
 				}
-				
-				quest.userStatus.completedAt = new Date();
-				addLog(`✅ "${questName}" completed`, 'success');
-				updateQuestDisplay([quest, ...quests]);
-				setTimeout(doJob, 1000);
-			};
-			fn();
+				await sleep(20_000);
+			}
 		}
-	};
-	
+
+		// ── Wrap up quest ────────────────────────────────────────────────────
+		const wasSkipped = AutomatorState.skipRequested;
+		AutomatorState.skipRequested = false;
+
+		if (!wasSkipped) {
+			quest.userStatus.completedAt = new Date();
+			addLog(`✅ "${questName}" completed`, 'success');
+			AutomatorState.completedQuests = AutomatorState.totalQuests - quests.length;
+		} else {
+			addLog(`⏭ "${questName}" was skipped`, 'warning');
+			// Don't count it as completed
+			AutomatorState.completedQuests = Math.max(0, AutomatorState.completedQuests - 1);
+		}
+
+		updateQuestDisplay([quest, ...quests]);
+		updateStats(AutomatorState.totalQuests, quests.length, AutomatorState.totalQuests - quests.length - (wasSkipped ? 0 : 0));
+
+		await sleep(1200);
+		doJob();
+	}
+
 	doJob();
 }
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
