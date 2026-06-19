@@ -948,20 +948,16 @@ if (!quests.length) {
 	window._qaSkipCurrent = () => requestSkip();
 
 	async function doJob() {
+		// Drain any pending skip before popping next quest
 		if (AutomatorState.skipRequested) {
 			AutomatorState.skipRequested = false;
 			clearStuckWatchdog();
-			addLog('⏭ Quest skipped', 'warning');
-			// remove stuck styling
 			if (AutomatorState.activeQuestId) {
 				document.getElementById(`quest-${AutomatorState.activeQuestId}`)?.classList.remove('stuck-warning');
 			}
 		}
 
-		// Wait out pause
-		while (AutomatorState.isPaused) {
-			await sleep(1000);
-		}
+		while (AutomatorState.isPaused) await sleep(1000);
 
 		const quest = quests.pop();
 		if (!quest) {
@@ -983,38 +979,35 @@ if (!quests.length) {
 		const secondsNeeded   = taskConfig.tasks[taskName].target;
 		let   secondsDone     = quest.userStatus?.progress?.[taskName]?.value ?? 0;
 
-		AutomatorState.completedQuests++;
 		AutomatorState.activeQuestId = quest.id;
-		updateStats(AutomatorState.totalQuests, AutomatorState.totalQuests - AutomatorState.completedQuests, AutomatorState.completedQuests - 1);
 		updateQuestDisplay([quest, ...quests], quest.id);
 		addLog(`▶ Processing: ${questName}`, 'info');
-
 		resetStuckWatchdog();
 
-		// ── WATCH_VIDEO ──────────────────────────────────────────────────────
+		// ── WATCH_VIDEO / WATCH_VIDEO_ON_MOBILE ──────────────────────────────
 		if (taskName === 'WATCH_VIDEO' || taskName === 'WATCH_VIDEO_ON_MOBILE') {
 			addLog('📺 Video quest — fast-forwarding…', 'info');
-			const maxFuture = 10, speed = 7, enrolledAt = new Date(quest.userStatus.enrolledAt).getTime();
+			const speed = 7;
 			let completed = false;
 
 			while (true) {
-				// skip/pause handling
 				if (AutomatorState.skipRequested) break;
 				while (AutomatorState.isPaused) await sleep(1000);
 				if (AutomatorState.skipRequested) break;
 
-				const maxAllowed = Math.floor((Date.now() - enrolledAt) / 1000) + maxFuture;
-				if (maxAllowed - secondsDone >= speed) {
-					const ts = Math.min(secondsNeeded, secondsDone + speed + Math.random());
-					const res = await api.post({ url: `/quests/${quest.id}/video-progress`, body: { timestamp: ts } });
-					completed = res.body.completed_at != null;
-					secondsDone = Math.min(secondsNeeded, secondsDone + speed);
-					updateQuestProgress(quest.id, secondsDone, secondsNeeded);
-					onProgressMade();
-				}
+				// Wait real-time for the current chunk (matches original pacing)
+				const remaining = Math.min(speed, secondsNeeded - secondsDone);
+				await sleep(remaining * 1000);
+				if (AutomatorState.skipRequested) break;
+
+				const ts  = Math.min(secondsNeeded, secondsDone + speed + Math.random());
+				const res = await api.post({ url: `/quests/${quest.id}/video-progress`, body: { timestamp: ts } });
+				completed   = res.body.completed_at != null;
+				secondsDone = Math.min(secondsNeeded, secondsDone + speed);
+				updateQuestProgress(quest.id, secondsDone, secondsNeeded);
+				onProgressMade();
 
 				if (secondsDone >= secondsNeeded) break;
-				await sleep(1000);
 			}
 
 			if (!AutomatorState.skipRequested && !completed) {
@@ -1024,114 +1017,106 @@ if (!quests.length) {
 		// ── PLAY_ON_DESKTOP ──────────────────────────────────────────────────
 		} else if (taskName === 'PLAY_ON_DESKTOP') {
 			if (!isApp) {
-				addLog('❌ PLAY_ON_DESKTOP requires Discord Desktop App — skipping', 'error');
-				quests.push(quest); // put it back? No — just skip gracefully
-				AutomatorState.completedQuests--;
-				setTimeout(doJob, 500);
-				return;
+				addLog('❌ Desktop App required for this quest — skipping', 'error');
+				AutomatorState.skipRequested = true;
+			} else {
+				addLog(`🎮 Spoofing game: ${applicationName}`, 'info');
+				const appRes  = await api.get({ url: `/applications/public?application_ids=${applicationId}` });
+				const appData = appRes.body[0];
+				const exeName = appData.executables?.find(x => x.os === 'win32')?.name?.replace('>', '')
+				             ?? appData.name.replace(/[\/\\:*?"<>|]/g, '') + '.exe';
+
+				const fakeGame = {
+					cmdLine: `C:\\Program Files\\${appData.name}\\${exeName}`,
+					exeName, exePath: `c:/program files/${appData.name.toLowerCase()}/${exeName}`,
+					hidden: false, isLauncher: false, id: applicationId,
+					name: appData.name, pid, pidPath: [pid],
+					processName: appData.name, start: Date.now(),
+				};
+
+				const realGames           = RunningGameStore.getRunningGames();
+				const realGetRunningGames = RunningGameStore.getRunningGames;
+				const realGetGameForPID   = RunningGameStore.getGameForPID;
+				const fakeGames           = [fakeGame];
+
+				RunningGameStore.getRunningGames = () => fakeGames;
+				RunningGameStore.getGameForPID   = p => fakeGames.find(x => x.pid === p);
+				FluxDispatcher.dispatch({ type: 'RUNNING_GAMES_CHANGE', removed: realGames, added: [fakeGame], games: fakeGames });
+				addLog(`✓ Spoofed ${applicationName} — waiting for heartbeats`, 'success');
+
+				await new Promise(resolve => {
+					const cleanup = () => {
+						RunningGameStore.getRunningGames = realGetRunningGames;
+						RunningGameStore.getGameForPID   = realGetGameForPID;
+						FluxDispatcher.dispatch({ type: 'RUNNING_GAMES_CHANGE', removed: [fakeGame], added: [], games: [] });
+						FluxDispatcher.unsubscribe('QUESTS_SEND_HEARTBEAT_SUCCESS', fn);
+						clearInterval(skipPoll);
+					};
+					const skipPoll = setInterval(() => {
+						if (AutomatorState.skipRequested) { cleanup(); resolve(); }
+					}, 2000);
+					const fn = data => {
+						if (AutomatorState.skipRequested) { cleanup(); resolve(); return; }
+						if (AutomatorState.isPaused) return;
+						const progress = quest.config.configVersion === 1
+							? data.userStatus.streamProgressSeconds
+							: Math.floor(data.userStatus.progress.PLAY_ON_DESKTOP.value);
+						updateQuestProgress(quest.id, progress, secondsNeeded);
+						onProgressMade();
+						if (progress >= secondsNeeded) { cleanup(); resolve(); }
+					};
+					FluxDispatcher.subscribe('QUESTS_SEND_HEARTBEAT_SUCCESS', fn);
+				});
 			}
-
-			addLog(`🎮 Spoofing game: ${applicationName}`, 'info');
-			const appRes   = await api.get({ url: `/applications/public?application_ids=${applicationId}` });
-			const appData  = appRes.body[0];
-			const exeName  = appData.executables.find(x => x.os === 'win32').name.replace('>', '');
-
-			const fakeGame = {
-				cmdLine: `C:\\Program Files\\${appData.name}\\${exeName}`,
-				exeName, exePath: `c:/program files/${appData.name.toLowerCase()}/${exeName}`,
-				hidden: false, isLauncher: false, id: applicationId,
-				name: appData.name, pid, pidPath: [pid],
-				processName: appData.name, start: Date.now(),
-			};
-
-			const realGetRunningGames = RunningGameStore.getRunningGames;
-			const realGetGameForPID   = RunningGameStore.getGameForPID;
-			const fakeGames = [fakeGame];
-
-			RunningGameStore.getRunningGames = () => fakeGames;
-			RunningGameStore.getGameForPID   = p => fakeGames.find(x => x.pid === p);
-			FluxDispatcher.dispatch({ type: 'RUNNING_GAMES_CHANGE', removed: RunningGameStore.getRunningGames(), added: [fakeGame], games: fakeGames });
-			addLog(`✓ Spoofed ${applicationName}`, 'success');
-
-			// Heartbeat listener — returns a cleanup fn
-			await new Promise(resolve => {
-				const fn = data => {
-					if (AutomatorState.skipRequested) {
-						cleanup(); resolve(); return;
-					}
-					if (AutomatorState.isPaused) return;
-					const progress = quest.config.configVersion === 1
-						? data.userStatus.streamProgressSeconds
-						: Math.floor(data.userStatus.progress.PLAY_ON_DESKTOP.value);
-					updateQuestProgress(quest.id, progress, secondsNeeded);
-					onProgressMade();
-					if (progress >= secondsNeeded) { cleanup(); resolve(); }
-				};
-				const cleanup = () => {
-					RunningGameStore.getRunningGames = realGetRunningGames;
-					RunningGameStore.getGameForPID   = realGetGameForPID;
-					FluxDispatcher.dispatch({ type: 'RUNNING_GAMES_CHANGE', removed: [fakeGame], added: [], games: [] });
-					FluxDispatcher.unsubscribe('QUESTS_SEND_HEARTBEAT_SUCCESS', fn);
-				};
-
-				// Safety: auto-resolve if stuck with skip
-				const stuckCheck = setInterval(() => {
-					if (AutomatorState.skipRequested) { clearInterval(stuckCheck); cleanup(); resolve(); }
-				}, 2000);
-
-				FluxDispatcher.subscribe('QUESTS_SEND_HEARTBEAT_SUCCESS', fn);
-			});
 
 		// ── STREAM_ON_DESKTOP ────────────────────────────────────────────────
 		} else if (taskName === 'STREAM_ON_DESKTOP') {
 			if (!isApp) {
-				addLog('❌ STREAM_ON_DESKTOP requires Discord Desktop App — skipping', 'error');
-				AutomatorState.completedQuests--;
-				setTimeout(doJob, 500);
-				return;
+				addLog('❌ Desktop App required for this quest — skipping', 'error');
+				AutomatorState.skipRequested = true;
+			} else {
+				addLog('📡 Spoofing stream… (need 1+ person in VC)', 'warning');
+				const realStreamMeta = ApplicationStreamingStore.getStreamerActiveStreamMetadata;
+				ApplicationStreamingStore.getStreamerActiveStreamMetadata = () => ({ id: applicationId, pid, sourceName: null });
+				addLog('✓ Spoofed stream metadata', 'success');
+
+				await new Promise(resolve => {
+					const cleanup = () => {
+						ApplicationStreamingStore.getStreamerActiveStreamMetadata = realStreamMeta;
+						FluxDispatcher.unsubscribe('QUESTS_SEND_HEARTBEAT_SUCCESS', fn);
+						clearInterval(skipPoll);
+					};
+					const skipPoll = setInterval(() => {
+						if (AutomatorState.skipRequested) { cleanup(); resolve(); }
+					}, 2000);
+					const fn = data => {
+						if (AutomatorState.skipRequested) { cleanup(); resolve(); return; }
+						if (AutomatorState.isPaused) return;
+						const progress = quest.config.configVersion === 1
+							? data.userStatus.streamProgressSeconds
+							: Math.floor(data.userStatus.progress.STREAM_ON_DESKTOP.value);
+						updateQuestProgress(quest.id, progress, secondsNeeded);
+						onProgressMade();
+						if (progress >= secondsNeeded) { cleanup(); resolve(); }
+					};
+					FluxDispatcher.subscribe('QUESTS_SEND_HEARTBEAT_SUCCESS', fn);
+				});
 			}
-
-			addLog('📡 Spoofing stream… (you need 1+ person in VC)', 'warning');
-			const realStreamMeta = ApplicationStreamingStore.getStreamerActiveStreamMetadata;
-			ApplicationStreamingStore.getStreamerActiveStreamMetadata = () => ({ id: applicationId, pid, sourceName: null });
-			addLog('✓ Spoofed stream metadata', 'success');
-
-			await new Promise(resolve => {
-				const fn = data => {
-					if (AutomatorState.skipRequested) { cleanup(); resolve(); return; }
-					if (AutomatorState.isPaused) return;
-					const progress = quest.config.configVersion === 1
-						? data.userStatus.streamProgressSeconds
-						: Math.floor(data.userStatus.progress.STREAM_ON_DESKTOP.value);
-					updateQuestProgress(quest.id, progress, secondsNeeded);
-					onProgressMade();
-					if (progress >= secondsNeeded) { cleanup(); resolve(); }
-				};
-				const cleanup = () => {
-					ApplicationStreamingStore.getStreamerActiveStreamMetadata = realStreamMeta;
-					FluxDispatcher.unsubscribe('QUESTS_SEND_HEARTBEAT_SUCCESS', fn);
-				};
-				const stuckCheck = setInterval(() => {
-					if (AutomatorState.skipRequested) { clearInterval(stuckCheck); cleanup(); resolve(); }
-				}, 2000);
-				FluxDispatcher.subscribe('QUESTS_SEND_HEARTBEAT_SUCCESS', fn);
-			});
 
 		// ── PLAY_ACTIVITY ────────────────────────────────────────────────────
 		} else if (taskName === 'PLAY_ACTIVITY') {
 			addLog('🎯 Activity quest — sending heartbeats…', 'info');
-			const channelId = ChannelStore.getSortedPrivateChannels()[0]?.id ??
-				Object.values(GuildChannelStore.getAllGuilds()).find(x => x?.VOCAL?.length > 0).VOCAL[0].channel.id;
+			const channelId = ChannelStore.getSortedPrivateChannels()[0]?.id
+			               ?? Object.values(GuildChannelStore.getAllGuilds()).find(x => x?.VOCAL?.length > 0).VOCAL[0].channel.id;
 			const streamKey = `call:${channelId}:1`;
-			let progress = 0;
 
 			while (true) {
 				if (AutomatorState.skipRequested) break;
 				while (AutomatorState.isPaused) await sleep(1000);
 				if (AutomatorState.skipRequested) break;
 
-				const res = await api.post({ url: `/quests/${quest.id}/heartbeat`, body: { stream_key: streamKey, terminal: false } });
-				progress = res.body.progress.PLAY_ACTIVITY.value;
+				const res      = await api.post({ url: `/quests/${quest.id}/heartbeat`, body: { stream_key: streamKey, terminal: false } });
+				const progress = res.body.progress.PLAY_ACTIVITY.value;
 				updateQuestProgress(quest.id, progress, secondsNeeded);
 				onProgressMade();
 
@@ -1143,24 +1128,26 @@ if (!quests.length) {
 			}
 		}
 
-		// ── Wrap up quest ────────────────────────────────────────────────────
+		// ── Wrap up ──────────────────────────────────────────────────────────
 		const wasSkipped = AutomatorState.skipRequested;
 		AutomatorState.skipRequested = false;
 
 		if (!wasSkipped) {
 			quest.userStatus.completedAt = new Date();
 			addLog(`✅ "${questName}" completed`, 'success');
-			AutomatorState.completedQuests = AutomatorState.totalQuests - quests.length;
 		} else {
-			addLog(`⏭ "${questName}" was skipped`, 'warning');
-			// Don't count it as completed
-			AutomatorState.completedQuests = Math.max(0, AutomatorState.completedQuests - 1);
+			addLog(`⏭ "${questName}" skipped`, 'warning');
 		}
 
-		updateQuestDisplay([quest, ...quests]);
-		updateStats(AutomatorState.totalQuests, quests.length, AutomatorState.totalQuests - quests.length - (wasSkipped ? 0 : 0));
+		// Recalculate from queue length — never drift from source of truth
+		const remaining = quests.length;
+		const completed = AutomatorState.totalQuests - remaining - (wasSkipped ? 1 : 0);
+		AutomatorState.completedQuests = Math.max(0, completed);
 
-		await sleep(1200);
+		updateQuestDisplay([quest, ...quests]);
+		updateStats(AutomatorState.totalQuests, remaining, AutomatorState.completedQuests);
+
+		await sleep(1000);
 		doJob();
 	}
 
